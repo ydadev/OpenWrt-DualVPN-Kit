@@ -1,0 +1,133 @@
+#!/bin/sh
+set -eu
+
+CONF="${1:-}"
+IFACE="${2:-awg0}"
+MTU="${3:-1420}"
+PEER="${IFACE}_peer"
+
+[ -n "$CONF" ] || { echo "Usage: $0 /tmp/client.conf [interface-name]" >&2; exit 1; }
+[ -r "$CONF" ] || { echo "ERROR: cannot read $CONF" >&2; exit 1; }
+echo "$IFACE" | grep -Eq '^[A-Za-z0-9_]+$' || { echo 'ERROR: unsafe interface name.' >&2; exit 1; }
+echo "$MTU" | grep -Eq '^[0-9]+$' || { echo 'ERROR: MTU must be numeric.' >&2; exit 1; }
+chmod 600 "$CONF"
+
+PEER_COUNT="$(awk '/^[ \t]*\[Peer\][ \t\r]*$/ { count++ } END { print count+0 }' "$CONF")"
+[ "$PEER_COUNT" -eq 1 ] || { echo "ERROR: exactly one [Peer] is required; found $PEER_COUNT." >&2; exit 1; }
+
+get_value() {
+    section="$1"
+    wanted="$2"
+    awk -v section="[$section]" -v wanted="$wanted" '
+        function trim(s) { sub(/^[ \t\r]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+        /^[ \t]*\[/ { current=trim($0); next }
+        current == section {
+            pos=index($0, "=")
+            if (pos > 0) {
+                key=trim(substr($0, 1, pos-1))
+                if (key == wanted) { print trim(substr($0, pos+1)); exit }
+            }
+        }
+    ' "$CONF"
+}
+
+PRIVATE_KEY="$(get_value Interface PrivateKey)"
+ADDRESS="$(get_value Interface Address)"
+DNS="$(get_value Interface DNS)"
+JC="$(get_value Interface Jc)"
+JMIN="$(get_value Interface Jmin)"
+JMAX="$(get_value Interface Jmax)"
+S1="$(get_value Interface S1)"
+S2="$(get_value Interface S2)"
+S3="$(get_value Interface S3)"
+S4="$(get_value Interface S4)"
+H1="$(get_value Interface H1)"
+H2="$(get_value Interface H2)"
+H3="$(get_value Interface H3)"
+H4="$(get_value Interface H4)"
+I1="$(get_value Interface I1)"
+I2="$(get_value Interface I2)"
+I3="$(get_value Interface I3)"
+I4="$(get_value Interface I4)"
+I5="$(get_value Interface I5)"
+PUBLIC_KEY="$(get_value Peer PublicKey)"
+PRESHARED_KEY="$(get_value Peer PresharedKey)"
+ALLOWED_IPS="$(get_value Peer AllowedIPs)"
+ENDPOINT="$(get_value Peer Endpoint)"
+KEEPALIVE="$(get_value Peer PersistentKeepalive)"
+
+[ -n "$PRIVATE_KEY" ] || { echo 'ERROR: Interface.PrivateKey is missing.' >&2; exit 1; }
+[ -n "$ADDRESS" ] || { echo 'ERROR: Interface.Address is missing.' >&2; exit 1; }
+[ -n "$PUBLIC_KEY" ] || { echo 'ERROR: Peer.PublicKey is missing.' >&2; exit 1; }
+[ -n "$ENDPOINT" ] || { echo 'ERROR: Peer.Endpoint is missing.' >&2; exit 1; }
+[ -n "$ALLOWED_IPS" ] || ALLOWED_IPS='0.0.0.0/0, ::/0'
+[ -n "$KEEPALIVE" ] || KEEPALIVE='25'
+
+case "$ENDPOINT" in
+    \[*\]:*) ENDPOINT_HOST="$(printf '%s' "$ENDPOINT" | sed 's/^\[\(.*\)\]:[0-9][0-9]*$/\1/')"; ENDPOINT_PORT="${ENDPOINT##*:}" ;;
+    *:*) ENDPOINT_HOST="${ENDPOINT%:*}"; ENDPOINT_PORT="${ENDPOINT##*:}" ;;
+    *) ENDPOINT_HOST="$ENDPOINT"; ENDPOINT_PORT='51820' ;;
+esac
+
+BACKUP="/root/pre-awg-config-$(date +%Y%m%d-%H%M%S).tar.gz"
+sysupgrade -b "$BACKUP"
+echo "Backup saved to $BACKUP"
+
+uci -q delete "network.$IFACE" || true
+uci -q delete "network.$PEER" || true
+uci set "network.$IFACE=interface"
+uci set "network.$IFACE.proto=amneziawg"
+uci set "network.$IFACE.private_key=$PRIVATE_KEY"
+uci -q delete "network.$IFACE.addresses" || true
+for interface_address in $(printf '%s' "$ADDRESS" | tr ',' ' '); do
+    [ -n "$interface_address" ] && uci add_list "network.$IFACE.addresses=$interface_address"
+done
+uci set "network.$IFACE.mtu=$MTU"
+uci set "network.$IFACE.metric=10"
+uci set "network.$IFACE.nohostroute=1"
+
+set_optional() {
+    option="$1"
+    value="$2"
+    [ -n "$value" ] && uci set "network.$IFACE.$option=$value"
+}
+
+set_optional awg_jc "$JC"
+set_optional awg_jmin "$JMIN"
+set_optional awg_jmax "$JMAX"
+set_optional awg_s1 "$S1"
+set_optional awg_s2 "$S2"
+set_optional awg_s3 "$S3"
+set_optional awg_s4 "$S4"
+set_optional awg_h1 "$H1"
+set_optional awg_h2 "$H2"
+set_optional awg_h3 "$H3"
+set_optional awg_h4 "$H4"
+set_optional awg_i1 "$I1"
+set_optional awg_i2 "$I2"
+set_optional awg_i3 "$I3"
+set_optional awg_i4 "$I4"
+set_optional awg_i5 "$I5"
+
+uci set "network.$PEER=amneziawg_$IFACE"
+uci set "network.$PEER.description=imported_awg_peer"
+uci set "network.$PEER.public_key=$PUBLIC_KEY"
+[ -n "$PRESHARED_KEY" ] && uci set "network.$PEER.preshared_key=$PRESHARED_KEY"
+uci set "network.$PEER.endpoint_host=$ENDPOINT_HOST"
+uci set "network.$PEER.endpoint_port=$ENDPOINT_PORT"
+uci set "network.$PEER.persistent_keepalive=$KEEPALIVE"
+uci set "network.$PEER.route_allowed_ips=0"
+uci -q delete "network.$PEER.allowed_ips" || true
+for allowed in $(printf '%s' "$ALLOWED_IPS" | tr ',' ' '); do
+    [ -n "$allowed" ] && uci add_list "network.$PEER.allowed_ips=$allowed"
+done
+
+uci commit network
+
+echo 'Configuration committed. Secrets are intentionally not printed.'
+echo "Endpoint: $ENDPOINT_HOST:$ENDPOINT_PORT"
+echo "Interface address: $ADDRESS"
+echo "DNS from the source file was not applied: ${DNS:-not specified}."
+echo 'Apply with:'
+echo '  /etc/init.d/network restart'
+echo "Then delete the temporary config: rm -f '$CONF'"

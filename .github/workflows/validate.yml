@@ -1,0 +1,40 @@
+name: Validate kit
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check shell syntax
+        run: find scripts -type f -exec sh -n {} \;
+      - name: Check Markdown links
+        run: python3 tools/check-markdown-links.py .
+      - name: Reject device-specific binaries
+        run: |
+          if find . -type f \( -name '*.apk' -o -name '*.ipk' -o -name '*.ko' -o -name '*.bin' -o -name '*.img' \) | grep -q .; then
+            echo 'Device-specific binary found' >&2
+            exit 1
+          fi
+      - name: Reject private key material
+        shell: python
+        run: |
+          import pathlib, re, sys
+          patterns = [
+              re.compile(r'^\s*(?:PrivateKey|PresharedKey)\s*=\s*(?!REPLACE_WITH_)[A-Za-z0-9+/]{40,}={0,2}\s*$', re.M),
+              re.compile(r"^\s*option\s+(?:private_key|preshared_key|password)\s+'(?!REPLACE_WITH_)[^']+'\s*$", re.M),
+          ]
+          bad = []
+          for path in pathlib.Path('.').rglob('*'):
+              if path.is_file() and '.git' not in path.parts:
+                  text = path.read_text(encoding='utf-8', errors='replace')
+                  if any(p.search(text) for p in patterns): bad.append(str(path))
+          if bad:
+              print('Possible secrets:', *bad, sep='\n', file=sys.stderr)
+              sys.exit(1)
