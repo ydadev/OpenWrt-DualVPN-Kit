@@ -1,0 +1,12 @@
+#!/bin/sh
+
+[ "$ACTION" = 'ifup' ] || exit 0
+transport_if="$(uci -q get vpnmode.main.transport_if || echo wan)"
+[ "$INTERFACE" = "$transport_if" ] || exit 0
+
+(
+    sleep 5
+    /usr/sbin/vpn-apply-route
+) &
+
+exit 0

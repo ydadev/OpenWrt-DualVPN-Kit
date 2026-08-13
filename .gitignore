@@ -1,0 +1,12 @@
+*.conf
+!examples/*.example.conf
+setup.env
+*.backup
+*.bak
+*.tar.gz
+*.log
+dist/
+.idea/
+.vscode/
+Thumbs.db
+.DS_Store
